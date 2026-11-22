@@ -952,7 +952,7 @@ function renderIndex(tab){
     box.innerHTML=BOOKMARKS.length?`<div class="grid" style="gap:.5rem">${BOOKMARKS.map((m,i)=>`
       <div class="sitem" data-bm="${i}">
         <span class="star8">🔖</span>
-        <span><span class="nm">${m.t==='ayah'?`${t('surah')} ${surahName(m.s)} — ${t('ayah')} ${AR(m.a)}`:`${t('page')} ${AR(m.page)}</span></span>
+        <span><span class="nm">${m.t==='ayah'}?`${t('surah')} ${surahName(m.s)} — ${t('ayah')} ${AR(m.a)}`:`${t('page')} ${AR(m.page)}</span></span>
         <span class="go"><button class="icoBtn" data-delbm="${i}" aria-label="حذف"><svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg></button></span>
       </div>`).join('')}</div>`:`<p class="muted" style="text-align:center;padding:2rem">🔖 —</p>`;
   }
