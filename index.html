@@ -627,16 +627,19 @@ async function loadText(s){
   TEXT_CACHE[s]=r.data;return r.data;
 }
 function stripBismillah(text){
-  const target='بسم الله الرحمن الرحيم';let acc='',raw='';
-  for(const ch of text){
-    const n=norm(ch);acc+=n;if(!target.startsWith(acc.slice(-target.length)===acc?acc:acc)&&acc.length>target.length)return text;
-    if(target.startsWith(acc))continue;
-    if(acc===target)return text.slice([...text].slice(0,[...text].length).length)
+  // إزالة البسملة من بداية الآية الأولى بطريقة موثوقة بعد تطبيع الحروف
+  const target = 'بسم الله الرحمن الرحيم';
+  const chars = [...text];
+  let built = '', cut = -1;
+  for (let i = 0; i < chars.length; i++) {
+    const c = norm(chars[i]);
+    if (!c) continue; // تجاهل التشكيل والمسافات الزائدة في المقارنة
+    built += c;
+    if (built === target) { cut = i; break; }
+    if (!target.startsWith(built)) return text;
   }
-  // طريقة أبسط موثوقة: مقارنة تدريجية
-  let chars=[...text],built='',cut=-1;
-  for(let i=0;i<chars.length;i++){const c=norm(chars[i]);built+=c;if(built===target){cut=i;break}if(!target.startsWith(built))return text}
-  return cut<0?text:chars.slice(cut+1).join('').replace(/^\s+/,'');
+  if (cut < 0) return text;
+  return chars.slice(cut + 1).join('').replace(/^\s+/, '');
 }
 async function loadEditions(){
   try{
@@ -1053,48 +1056,218 @@ $('#rdClose').onclick=()=>$('#reciterDetail').hidden=true;
 
 /* ---------------- المشغل الصوتي ---------------- */
 const AU={
-  el:new Audio(),mode:null,surah:1,n:1,reciterIdx:0,bit:0,repeatN:1,rCount:0,active:false,
-  srcSurah(s,idx){const r=RECITERS[idx]||RECITERS[0];return r.server+pad(s)+'.mp3'},
-  srcAyah(g){return `${CDN}${[128,64,32][this.bit]}/${S.ayahReciter}/${g}.mp3`},
-  playSurah(s,idx){this.stopMeta();this.mode='surah';this.surah=s;this.reciterIdx=idx??S.reciterIdx;this.el.src=this.srcSurah(s,this.reciterIdx);this.play()},
-  playAyahFrom(s,n,rep){this.stopMeta();this.mode='ayah';this.surah=s;this.n=n;this.bit=0;this.repeatN=rep||1;this.rCount=0;this.el.src=this.srcAyah(G(s,n));this.play()},
-  stopMeta(){this.rCount=0},
-  play(){this.active=true;this.el.playbackRate=+$('#pSpeed').value;this.el.play().catch(()=>toast(t('error'),1));this.ui()},
-  toggle(){if(!this.active)return;this.el.paused?this.play():(this.el.pause(),this.ui())},
-  close(){this.el.pause();this.el.src='';this.active=false;this.mode=null;$('#player').classList.remove('show','playing');clearHl()},
+  el:new Audio(),
+  mode:null,          // 'ayah' | 'surah'
+  surah:1,
+  n:1,
+  reciterIdx:0,
+  bit:0,              // 0 = 128kbps, 1 = 64kbps
+  repeatN:1,
+  rCount:0,
+  active:false,
+  changing:false,     // يمنع رسائل الخطأ أثناء الانتقال المتعمد بين الآيات
+  lastErrorToast:0,   // لمنع تكرار رسالة الخطأ بسرعة
+
+  srcSurah(s,idx){
+    const r = RECITERS[idx] || RECITERS[0];
+    return r.server + pad(s) + '.mp3';
+  },
+  srcAyah(g){
+    // نستخدم فقط 128 ثم 64 (32 يعطي 403)
+    const rates = [128, 64];
+    return `${CDN}${rates[this.bit] || 128}/${S.ayahReciter}/${g}.mp3`;
+  },
+
+  // تشغيل سورة كاملة
+  playSurah(s, idx){
+    this.stopMeta();
+    this.mode = 'surah';
+    this.surah = s;
+    this.reciterIdx = idx ?? S.reciterIdx;
+    this.bit = 0;
+    this._loadAndPlay(this.srcSurah(s, this.reciterIdx));
+  },
+
+  // تشغيل من آية معينة مع إمكانية التكرار
+  playAyahFrom(s, n, rep){
+    this.stopMeta();
+    this.mode = 'ayah';
+    this.surah = s;
+    this.n = n;
+    this.bit = 0;
+    this.repeatN = rep || 1;
+    this.rCount = 0;
+    this._loadAndPlay(this.srcAyah(G(s, n)));
+  },
+
+  stopMeta(){ this.rCount = 0; },
+
+  // تحميل نظيف + تشغيل مع حماية من رسائل الخطأ الوهمية
+  _loadAndPlay(url){
+    this.active = true;
+    this.changing = true;
+    this.el.pause();
+    this.el.src = url;
+    this.el.load();
+    this.el.playbackRate = +($('#pSpeed')?.value || 1);
+
+    const playPromise = this.el.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          this.changing = false;
+          this.ui();
+        })
+        .catch(err => {
+          // نتجاهل الأخطاء أثناء التغيير المتعمد أو إذا كان المستخدم أوقف التشغيل
+          if (this.changing || !this.active) {
+            this.changing = false;
+            return;
+          }
+          // محاولة جودة أقل مرة واحدة فقط
+          if (this.mode === 'ayah' && this.bit < 1) {
+            this.bit++;
+            this._loadAndPlay(this.srcAyah(G(this.surah, this.n)));
+            return;
+          }
+          this.changing = false;
+          this._showErrorOnce();
+          this.ui();
+        });
+    } else {
+      this.changing = false;
+      this.ui();
+    }
+  },
+
+  play(){
+    if (!this.active) return;
+    this.el.playbackRate = +($('#pSpeed')?.value || 1);
+    const p = this.el.play();
+    if (p !== undefined) {
+      p.catch(() => {
+        if (!this.changing && this.active) this._showErrorOnce();
+      });
+    }
+    this.ui();
+  },
+
+  toggle(){
+    if (!this.active) return;
+    if (this.el.paused) this.play();
+    else { this.el.pause(); this.ui(); }
+  },
+
+  close(){
+    this.changing = true;
+    this.el.pause();
+    this.el.removeAttribute('src');
+    this.el.load();
+    this.active = false;
+    this.mode = null;
+    this.changing = false;
+    $('#player').classList.remove('show', 'playing');
+    clearHl();
+  },
+
+  _showErrorOnce(){
+    const now = Date.now();
+    if (now - this.lastErrorToast < 4000) return; // لا تكرر الرسالة خلال 4 ثوانٍ
+    this.lastErrorToast = now;
+    toast(t('error'), 1);
+  },
+
   ui(){
-    $('#player').classList.toggle('show',this.active);
-    $('#player').classList.toggle('playing',this.active&&!this.el.paused);
-    const nm=this.mode==='surah'?surahName(this.surah):`${surahName(this.surah)} — ${t('ayah')} ${AR(this.n)}`;
-    const rc=this.mode==='surah'?(RECITERS[this.reciterIdx]?.name||''):(AYAH_RECITERS.find(x=>x[0]===S.ayahReciter)?.[1]||'');
-    $('#pTitle').textContent=nm;$('#pSub').textContent=rc+(this.repeatN>1?` • 🔁 ×${this.repeatN}`:'');
-    $('#pPlayIc').innerHTML=this.el.paused?'<path d="M7 4.5v15l12-7.5z"/>':'<path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/>';
+    $('#player').classList.toggle('show', this.active);
+    $('#player').classList.toggle('playing', this.active && !this.el.paused);
+    const nm = this.mode === 'surah'
+      ? surahName(this.surah)
+      : `${surahName(this.surah)} — ${t('ayah')} ${AR(this.n)}`;
+    const rc = this.mode === 'surah'
+      ? (RECITERS[this.reciterIdx]?.name || '')
+      : (AYAH_RECITERS.find(x => x[0] === S.ayahReciter)?.[1] || '');
+    $('#pTitle').textContent = nm;
+    $('#pSub').textContent = rc + (this.repeatN > 1 ? ` • 🔁 ×${this.repeatN}` : '');
+    $('#pPlayIc').innerHTML = this.el.paused
+      ? '<path d="M7 4.5v15l12-7.5z"/>'
+      : '<path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/>';
     highlight();
   }
 };
-AU.el.addEventListener('timeupdate',()=>{if(!AU.el.duration)return;$('#pSeek').value=AU.el.currentTime/AU.el.duration*100;$('#pTime').textContent=fmtT(AU.el.currentTime)+' / '+fmtT(AU.el.duration)});
-$('#pSeek').addEventListener('input',e=>{if(AU.el.duration)AU.el.currentTime=e.target.value/100*AU.el.duration});
-AU.el.addEventListener('ended',()=>{
-  if(AU.mode==='ayah'){
-    if(AU.rCount<AU.repeatN-1){AU.rCount++;AU.el.currentTime=0;AU.play();return}
-    const meta=surahMeta(AU.surah);
-    if(AU.n<meta.numberOfAyahs){AU.n++;AU.bit=0;AU.el.src=AU.srcAyah(G(AU.surah,AU.n));AU.play()}
-    else{toast('﴿ '+surahName(AU.surah)+' ﴾ ✓');AU.close()}
-  }else{
-    if(AU.surah<114){AU.surah++;AU.el.src=AU.srcSurah(AU.surah,AU.reciterIdx);AU.play()}else AU.close();
+
+// تحديث شريط التقدم
+AU.el.addEventListener('timeupdate', () => {
+  if (!AU.el.duration) return;
+  $('#pSeek').value = AU.el.currentTime / AU.el.duration * 100;
+  $('#pTime').textContent = fmtT(AU.el.currentTime) + ' / ' + fmtT(AU.el.duration);
+});
+$('#pSeek').addEventListener('input', e => {
+  if (AU.el.duration) AU.el.currentTime = e.target.value / 100 * AU.el.duration;
+});
+
+// انتهاء المقطع → الانتقال للآية/السورة التالية بدون إظهار خطأ
+AU.el.addEventListener('ended', () => {
+  if (!AU.active) return;
+
+  if (AU.mode === 'ayah') {
+    // تكرار الآية الحالية إن لزم
+    if (AU.rCount < AU.repeatN - 1) {
+      AU.rCount++;
+      AU.el.currentTime = 0;
+      AU.play();
+      return;
+    }
+    // الانتقال للآية التالية
+    const meta = surahMeta(AU.surah);
+    if (AU.n < meta.numberOfAyahs) {
+      AU.n++;
+      AU.bit = 0;
+      AU.rCount = 0;
+      AU._loadAndPlay(AU.srcAyah(G(AU.surah, AU.n)));
+    } else {
+      toast('﴿ ' + surahName(AU.surah) + ' ﴾ ✓');
+      AU.close();
+    }
+  } else if (AU.mode === 'surah') {
+    if (AU.surah < 114) {
+      AU.surah++;
+      AU.bit = 0;
+      AU._loadAndPlay(AU.srcSurah(AU.surah, AU.reciterIdx));
+    } else {
+      AU.close();
+    }
   }
 });
-AU.el.addEventListener('error',()=>{
-  if(!AU.active)return;
-  if(AU.mode==='ayah'&&AU.bit<2){AU.bit++;AU.el.src=AU.srcAyah(G(AU.surah,AU.n));AU.play()}
-  else{toast(t('error'),1)}
+
+// معالج الخطأ: يتجاهل الأخطاء أثناء التغيير المتعمد، ويحاول جودة أقل مرة واحدة فقط
+AU.el.addEventListener('error', () => {
+  if (!AU.active || AU.changing) return;
+
+  if (AU.mode === 'ayah' && AU.bit < 1) {
+    AU.bit++;
+    AU._loadAndPlay(AU.srcAyah(G(AU.surah, AU.n)));
+    return;
+  }
+  // فشل نهائي فقط
+  AU._showErrorOnce();
 });
-$('#pPlay').onclick=()=>AU.toggle();
-$('#pPrev').onclick=()=>{if(AU.mode==='surah')AU.playSurah(Math.max(1,AU.surah-1),AU.reciterIdx);else AU.playAyahFrom(AU.surah,Math.max(1,AU.n-1),AU.repeatN)};
-$('#pNext').onclick=()=>{if(AU.mode==='surah')AU.playSurah(Math.min(114,AU.surah+1),AU.reciterIdx);else AU.playAyahFrom(AU.surah,AU.n+1,AU.repeatN)};
-$('#pSpeed').onchange=e=>AU.el.playbackRate=+e.target.value;
-$('#pRepeat').onclick=()=>{if(AU.mode==='ayah')openRepeatModal(AU.surah,AU.n);else if(AU.mode==='surah'){AU.el.currentTime=0;AU.play()}};
-$('#pClose').onclick=()=>AU.close();
+
+$('#pPlay').onclick = () => AU.toggle();
+$('#pPrev').onclick = () => {
+  if (AU.mode === 'surah') AU.playSurah(Math.max(1, AU.surah - 1), AU.reciterIdx);
+  else AU.playAyahFrom(AU.surah, Math.max(1, AU.n - 1), AU.repeatN);
+};
+$('#pNext').onclick = () => {
+  if (AU.mode === 'surah') AU.playSurah(Math.min(114, AU.surah + 1), AU.reciterIdx);
+  else AU.playAyahFrom(AU.surah, AU.n + 1, AU.repeatN);
+};
+$('#pSpeed').onchange = e => { AU.el.playbackRate = +e.target.value; };
+$('#pRepeat').onclick = () => {
+  if (AU.mode === 'ayah') openRepeatModal(AU.surah, AU.n);
+  else if (AU.mode === 'surah') { AU.el.currentTime = 0; AU.play(); }
+};
+$('#pClose').onclick = () => AU.close();
+
 function clearHl(){$$('#rBody .playing').forEach(x=>x.classList.remove('playing'))}
 function highlight(){
   clearHl();
